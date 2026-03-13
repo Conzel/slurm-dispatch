@@ -4,10 +4,11 @@ struct Config: Decodable {
     let clusters: [String: ClusterConfig]
     let s3: S3Config
     let git: GitConfig
+    let tokens: TokensConfig?
     let jobDefaults: JobDefaults
 
     enum CodingKeys: String, CodingKey {
-        case clusters, s3, git
+        case clusters, s3, git, tokens
         case jobDefaults = "job_defaults"
     }
 }
@@ -60,17 +61,23 @@ struct GitConfig: Decodable {
     }
 }
 
-struct JobDefaults: Decodable {
-    let localResultsFolderName: String
+struct TokensConfig: Decodable {
     let hfTokenFile: String?
 
     enum CodingKeys: String, CodingKey {
-        case localResultsFolderName = "local_results_folder_name"
         case hfTokenFile = "hf_token_file"
     }
 
     var expandedHfTokenPath: String? {
         hfTokenFile.map { ($0 as NSString).expandingTildeInPath }
+    }
+}
+
+struct JobDefaults: Decodable {
+    let localResultsFolderName: String
+
+    enum CodingKeys: String, CodingKey {
+        case localResultsFolderName = "local_results_folder_name"
     }
 }
 
@@ -104,9 +111,11 @@ let exampleConfig = """
     "results_upload_path": "s3://my-experiment-bucket/results/",
     "logs_upload_path": "s3://my-experiment-bucket/logs/"
   },
-  "job_defaults": {
-    "local_results_folder_name": "results",
+  "tokens": {
     "hf_token_file": "~/.cache/huggingface/token"
+  },
+  "job_defaults": {
+    "local_results_folder_name": "results"
   }
 }
 """

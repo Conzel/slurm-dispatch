@@ -75,7 +75,7 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
     }
 
     // Stage HF token if configured
-    if let localHfToken = config.jobDefaults.expandedHfTokenPath {
+    if let localHfToken = config.tokens?.expandedHfTokenPath {
         let hfTokenRemote = "\(repoDir)/.hf_token"
         let hfCheck = try ssh(cluster: cluster, command: "test -f \(hfTokenRemote) && echo exists || echo missing")
         if hfCheck.stdout.contains("missing") {
