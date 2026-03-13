@@ -31,6 +31,7 @@ func generateWrapper(
 
     # == Setup Phase ==
     export S3CMD_CONFIG=\(s3cfgPath)
+    [ -f \(repoDir)/.hf_token ] && export HF_TOKEN=$(cat \(repoDir)/.hf_token)
     cd \(repoDir)
 
     # == Teardown Trap ==

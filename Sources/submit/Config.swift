@@ -62,9 +62,15 @@ struct GitConfig: Decodable {
 
 struct JobDefaults: Decodable {
     let localResultsFolderName: String
+    let hfTokenFile: String?
 
     enum CodingKeys: String, CodingKey {
         case localResultsFolderName = "local_results_folder_name"
+        case hfTokenFile = "hf_token_file"
+    }
+
+    var expandedHfTokenPath: String? {
+        hfTokenFile.map { ($0 as NSString).expandingTildeInPath }
     }
 }
 
@@ -99,7 +105,8 @@ let exampleConfig = """
     "logs_upload_path": "s3://my-experiment-bucket/logs/"
   },
   "job_defaults": {
-    "local_results_folder_name": "results"
+    "local_results_folder_name": "results",
+    "hf_token_file": "~/.cache/huggingface/token"
   }
 }
 """

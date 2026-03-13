@@ -32,15 +32,15 @@ func run(_ executable: String, _ args: [String]) throws -> ShellResult {
     return ShellResult(stdout: stdout, stderr: stderr, exitCode: process.terminationStatus)
 }
 
-func ssh(cluster: ClusterConfig, command: String) throws -> ShellResult {
-    let args = [
+func ssh(cluster: ClusterConfig, command: String, agentForward: Bool = false) throws -> ShellResult {
+    var args = [
         "-i", cluster.expandedKeyPath,
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=10",
-        "\(cluster.user)@\(cluster.host)",
-        command
     ]
+    if agentForward { args.append("-A") }
+    args += ["\(cluster.user)@\(cluster.host)", command]
     return try run("/usr/bin/ssh", args)
 }
 

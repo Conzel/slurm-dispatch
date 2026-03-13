@@ -74,6 +74,22 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
         print("  .s3cfg already present.")
     }
 
+    // Stage HF token if configured
+    if let localHfToken = config.jobDefaults.expandedHfTokenPath {
+        let hfTokenRemote = "\(repoDir)/.hf_token"
+        let hfCheck = try ssh(cluster: cluster, command: "test -f \(hfTokenRemote) && echo exists || echo missing")
+        if hfCheck.stdout.contains("missing") {
+            print("  Staging HF token...")
+            let result = try scp(localPath: localHfToken, cluster: cluster, remotePath: hfTokenRemote)
+            guard result.succeeded else {
+                throw DispatchError.scpFailed(file: ".hf_token", output: result.combinedOutput)
+            }
+            _ = try ssh(cluster: cluster, command: "chmod 600 \(hfTokenRemote)")
+        } else {
+            print("  HF token already present.")
+        }
+    }
+
     // Download Singularity image if missing
     let sifCheck = try ssh(cluster: cluster, command: "test -f \(imageRemote) && echo exists || echo missing")
     if sifCheck.stdout.contains("missing") {
@@ -107,7 +123,7 @@ func setupRepo(cluster: ClusterConfig, config: Config) throws {
     fi
     """
     print("Setting up remote repo...")
-    let gitResult = try ssh(cluster: cluster, command: gitSetup)
+    let gitResult = try ssh(cluster: cluster, command: gitSetup, agentForward: true)
     if !gitResult.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         for line in gitResult.combinedOutput.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
