@@ -24,6 +24,39 @@ func generateWrapper(
         .joined(separator: "\n")
     let sbatchSection = sbatchLines.isEmpty ? "" : sbatchLines + "\n"
 
+    // Extract #REQUIRE S3 <path> directives
+    let s3Requires = userScriptContent
+        .components(separatedBy: .newlines)
+        .compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#REQUIRE S3 ") else { return nil }
+            let path = String(trimmed.dropFirst("#REQUIRE S3 ".count))
+                .trimmingCharacters(in: .whitespaces)
+            return path.isEmpty ? nil : path
+        }
+
+    let s3RequireSection: String
+    if s3Requires.isEmpty {
+        s3RequireSection = ""
+    } else {
+        let commands = s3Requires.map { path -> String in
+            let localPath = "\(resultsFolderName)/\(path)"
+            let remotePath = "\(resultsBase)\(path)"
+            let localDir = (localPath as NSString).deletingLastPathComponent
+            return """
+                mkdir -p \(localDir)
+                echo "[submit] Downloading \(remotePath) -> \(localPath)"
+                s3cmd get \(remotePath) \(localPath)
+            """
+        }.joined(separator: "\n")
+        s3RequireSection = """
+
+        # == S3 Requirements ==
+        \(commands)
+
+        """
+    }
+
     return """
     #!/bin/bash
     \(sbatchSection)#SBATCH --output=\(repoDir)/logs/slurm-%j.out
@@ -57,7 +90,7 @@ func generateWrapper(
     }
     trap cleanup EXIT ERR TERM
 
-    # == Execution Phase ==
+    \(s3RequireSection)# == Execution Phase ==
     # singularity exec \(imagePath) bash \(scriptName)
     bash \(scriptName)
     """

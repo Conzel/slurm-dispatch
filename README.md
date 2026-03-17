@@ -25,3 +25,13 @@ submit example.sh
 5. Runs `sbatch` — on exit/error, the wrapper uploads results and logs to S3
 
 Results land at `results_upload_path/<results_folder>/`, logs at `logs_upload_path/<slurm_id>/`.
+
+## S3 Requirements
+
+Use `#REQUIRE S3 <path>` in your script to download files from S3 before execution:
+
+```bash
+#REQUIRE S3 15125_352935/model.pth
+```
+
+This downloads `s3://{results_upload_path}/15125_352935/model.pth` to `{local_results_folder_name}/15125_352935/model.pth` before your script runs.
