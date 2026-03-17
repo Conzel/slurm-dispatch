@@ -22,26 +22,48 @@ enum DispatchError: Error, LocalizedError {
 
 // MARK: - Load balancing
 
-func countRunningJobs(cluster: ClusterConfig) throws -> Int {
-    let result = try ssh(
-        cluster: cluster,
-        command: "squeue -r --me --noheader 2>/dev/null | wc -l"
-    )
-    guard result.succeeded else {
-        throw DispatchError.sshFailed(host: cluster.host, command: "squeue", output: result.combinedOutput)
+func getExpectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date {
+    let parentDir = (cluster.remoteRepoDir as NSString).deletingLastPathComponent
+    let remoteTmp = "\(parentDir)/.submit_test_\(UUID().uuidString).sbatch"
+    defer { _ = try? ssh(cluster: cluster, command: "rm -f \(remoteTmp)") }
+
+    let scpResult = try scp(localPath: scriptPath, cluster: cluster, remotePath: remoteTmp)
+    guard scpResult.succeeded else {
+        throw DispatchError.scpFailed(file: scriptPath, output: scpResult.combinedOutput)
     }
-    return Int(result.stdout) ?? 0
+
+    let result = try ssh(cluster: cluster, command: "sbatch --test-only \(remoteTmp) 2>&1")
+    // sbatch --test-only outputs to stderr, e.g.:
+    // "sbatch: Job 12345 to start at 2024-01-15T10:30:00 using 4 processors on nodes node01"
+    let output = result.combinedOutput
+    guard let range = output.range(of: "start at ") else {
+        throw DispatchError.sbatchOutputUnexpected(output)
+    }
+    let afterStartAt = output[range.upperBound...]
+    let dateString = String(afterStartAt.prefix(while: { !$0.isWhitespace }))
+
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+
+    guard let date = formatter.date(from: dateString) else {
+        throw DispatchError.sbatchOutputUnexpected(output)
+    }
+    return date
 }
 
-func selectCluster(from clusters: [String: ClusterConfig]) throws -> (name: String, config: ClusterConfig) {
-    var best: (name: String, config: ClusterConfig, count: Int)?
+func selectCluster(from clusters: [String: ClusterConfig], scriptPath: String) throws -> (name: String, config: ClusterConfig) {
+    let timeFormatter = DateFormatter()
+    timeFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+
+    var best: (name: String, config: ClusterConfig, startTime: Date)?
 
     for (name, cluster) in clusters {
         do {
-            let count = try countRunningJobs(cluster: cluster)
-            print("  \(name) (\(cluster.host)): \(count) queued/running jobs")
-            if best == nil || count < best!.count {
-                best = (name, cluster, count)
+            let startTime = try getExpectedStartTime(cluster: cluster, scriptPath: scriptPath)
+            print("  \(name) (\(cluster.host)): expected start at \(timeFormatter.string(from: startTime))")
+            if best == nil || startTime < best!.startTime {
+                best = (name, cluster, startTime)
             }
         } catch {
             print("  \(name) (\(cluster.host)): unreachable — \(error.localizedDescription)")

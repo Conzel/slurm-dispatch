@@ -42,9 +42,9 @@ for scriptPath in scriptPaths {
 do {
     let config = try loadConfig()
 
-    // Select the least-loaded cluster
-    print("Checking cluster loads...")
-    let (clusterName, cluster) = try selectCluster(from: config.clusters)
+    // Select the cluster with the earliest expected start time
+    print("Checking expected start times...")
+    let (clusterName, cluster) = try selectCluster(from: config.clusters, scriptPath: scriptPaths[0])
     print("Selected cluster: \(clusterName)")
 
     // Clone or update the repo first (creates remoteRepoDir)
