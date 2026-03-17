@@ -95,26 +95,27 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
     let s3ImagePath = config.s3.singularityImagePath
     let s3HashPath: String
     if let dotIndex = s3ImagePath.lastIndex(of: ".") {
-        s3HashPath = String(s3ImagePath[..<dotIndex]) + ".sha256"
+        s3HashPath = String(s3ImagePath[..<dotIndex]) + ".md5"
     } else {
-        s3HashPath = s3ImagePath + ".sha256"
+        s3HashPath = s3ImagePath + ".md5"
     }
 
     var needsDownload = true
     if sifCheck.stdout.contains("exists") {
-        // Compare local hash to remote .sha256 file
-        let localHashResult = try ssh(cluster: cluster, command: "sha256sum \(imageRemote) | awk '{print $1}'")
+        // Compare local MD5 hash to remote .md5 file
+        print("  Computing MD5 of local Singularity image...")
+        let localHashResult = try ssh(cluster: cluster, command: "md5sum \(imageRemote) | awk '{print $1}'")
         let remoteHashResult = try ssh(cluster: cluster, command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get \(s3HashPath) - 2>/dev/null | awk '{print $1}'")
 
         if localHashResult.succeeded && remoteHashResult.succeeded
             && !localHashResult.stdout.isEmpty && !remoteHashResult.stdout.isEmpty
             && localHashResult.stdout == remoteHashResult.stdout {
-            print("  Singularity image is up to date (SHA256 match).")
+            print("  Singularity image is up to date (MD5 match).")
             needsDownload = false
         } else if remoteHashResult.succeeded && !remoteHashResult.stdout.isEmpty {
-            print("  Singularity image is outdated (SHA256 mismatch), re-downloading...")
+            print("  Singularity image is outdated (MD5 mismatch), re-downloading...")
         } else {
-            print("  No remote .sha256 found, skipping hash check. Image already present.")
+            print("  No remote .md5 found, skipping hash check. Image already present.")
             needsDownload = false
         }
     }
