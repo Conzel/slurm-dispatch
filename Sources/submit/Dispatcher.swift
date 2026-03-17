@@ -90,13 +90,42 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
         }
     }
 
-    // Download Singularity image if missing
+    // Download Singularity image if missing or outdated
     let sifCheck = try ssh(cluster: cluster, command: "test -f \(imageRemote) && echo exists || echo missing")
-    if sifCheck.stdout.contains("missing") {
-        print("  Downloading Singularity image from S3 (this may take a while)...")
+    let s3ImagePath = config.s3.singularityImagePath
+    let s3HashPath: String
+    if let dotIndex = s3ImagePath.lastIndex(of: ".") {
+        s3HashPath = String(s3ImagePath[..<dotIndex]) + ".sha256"
+    } else {
+        s3HashPath = s3ImagePath + ".sha256"
+    }
+
+    var needsDownload = true
+    if sifCheck.stdout.contains("exists") {
+        // Compare local hash to remote .sha256 file
+        let localHashResult = try ssh(cluster: cluster, command: "sha256sum \(imageRemote) | awk '{print $1}'")
+        let remoteHashResult = try ssh(cluster: cluster, command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get \(s3HashPath) - 2>/dev/null | awk '{print $1}'")
+
+        if localHashResult.succeeded && remoteHashResult.succeeded
+            && !localHashResult.stdout.isEmpty && !remoteHashResult.stdout.isEmpty
+            && localHashResult.stdout == remoteHashResult.stdout {
+            print("  Singularity image is up to date (SHA256 match).")
+            needsDownload = false
+        } else if remoteHashResult.succeeded && !remoteHashResult.stdout.isEmpty {
+            print("  Singularity image is outdated (SHA256 mismatch), re-downloading...")
+        } else {
+            print("  No remote .sha256 found, skipping hash check. Image already present.")
+            needsDownload = false
+        }
+    }
+
+    if needsDownload {
+        if sifCheck.stdout.contains("missing") {
+            print("  Downloading Singularity image from S3 (this may take a while)...")
+        }
         let downloadResult = try ssh(
             cluster: cluster,
-            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get \(config.s3.singularityImagePath) \(imageRemote)"
+            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3ImagePath) \(imageRemote)"
         )
         guard downloadResult.succeeded else {
             throw DispatchError.sshFailed(
@@ -106,8 +135,6 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
             )
         }
         print("  Singularity image downloaded.")
-    } else {
-        print("  Singularity image already present.")
     }
 }
 
