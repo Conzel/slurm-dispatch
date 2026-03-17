@@ -17,12 +17,36 @@ func generateWrapper(
         ? config.s3.logsUploadPath
         : config.s3.logsUploadPath + "/"
 
+    let lines = userScriptContent.components(separatedBy: .newlines)
+
     // Extract #SBATCH directives from user script to forward them to the wrapper
-    let sbatchLines = userScriptContent
-        .components(separatedBy: .newlines)
+    let sbatchLines = lines
         .filter { $0.hasPrefix("#SBATCH") }
         .joined(separator: "\n")
     let sbatchSection = sbatchLines.isEmpty ? "" : sbatchLines + "\n"
+
+    // Extract #REQUIRE S3 <path> directives from anywhere in the user script
+    let s3RequirePaths = lines
+        .compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#REQUIRE S3 ") else { return nil }
+            let path = String(trimmed.dropFirst("#REQUIRE S3 ".count))
+                .trimmingCharacters(in: .whitespaces)
+            return path.isEmpty ? nil : path
+        }
+
+    // Generate download commands relative to repoDir (which is cd'd into during setup)
+    let s3DownloadSection: String
+    if s3RequirePaths.isEmpty {
+        s3DownloadSection = ""
+    } else {
+        let downloadCommands = s3RequirePaths.map { path -> String in
+            let destPath = "\(resultsFolderName)/\(path)"
+            let destDir = (destPath as NSString).deletingLastPathComponent
+            return "mkdir -p \(destDir) && s3cmd get \(resultsBase)\(path) \(destPath)"
+        }.joined(separator: "\n")
+        s3DownloadSection = "\n# == S3 Downloads (from #REQUIRE S3 directives) ==\n\(downloadCommands)\n"
+    }
 
     return """
     #!/bin/bash
@@ -32,7 +56,7 @@ func generateWrapper(
     # == Setup Phase ==
     export S3CMD_CONFIG=\(s3cfgPath)
     [ -f \(repoDir)/.hf_token ] && export HF_TOKEN=$(cat \(repoDir)/.hf_token)
-    cd \(repoDir)
+    cd \(repoDir)\(s3DownloadSection)
 
     # == Teardown Trap ==
     cleanup() {
