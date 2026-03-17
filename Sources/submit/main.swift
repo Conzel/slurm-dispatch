@@ -20,17 +20,21 @@ if args.first == "--init" {
     }
 }
 
-guard let scriptArg = args.first, !scriptArg.hasPrefix("-") else {
-    fputs("Usage: submit <script.sh>\n", stderr)
+let scriptArgs = args.filter { !$0.hasPrefix("-") }
+
+guard !scriptArgs.isEmpty else {
+    fputs("Usage: submit <script.sh> [script2.sh ...]\n", stderr)
     fputs("       submit --init   (create example config at \(configPath))\n", stderr)
     exit(1)
 }
 
-let scriptPath = (scriptArg as NSString).expandingTildeInPath
+let scriptPaths = scriptArgs.map { ($0 as NSString).expandingTildeInPath }
 
-guard FileManager.default.fileExists(atPath: scriptPath) else {
-    fputs("Error: script not found: \(scriptPath)\n", stderr)
-    exit(1)
+for scriptPath in scriptPaths {
+    guard FileManager.default.fileExists(atPath: scriptPath) else {
+        fputs("Error: script not found: \(scriptPath)\n", stderr)
+        exit(1)
+    }
 }
 
 // MARK: - Main flow
@@ -51,14 +55,15 @@ do {
     try validateCache(cluster: cluster, config: config)
 
     // Copy scripts and submit
-    print("Dispatching job...")
-    let slurmJobId = try dispatchJob(
-        cluster: cluster,
-        config: config,
-        scriptPath: scriptPath
-    )
-
-    print("Submitted batch job \(slurmJobId) on \(clusterName)")
+    for scriptPath in scriptPaths {
+        print("Dispatching job for \(URL(fileURLWithPath: scriptPath).lastPathComponent)...")
+        let slurmJobId = try dispatchJob(
+            cluster: cluster,
+            config: config,
+            scriptPath: scriptPath
+        )
+        print("Submitted batch job \(slurmJobId) on \(clusterName)")
+    }
 
 } catch {
     fputs("Error: \(error.localizedDescription)\n", stderr)
