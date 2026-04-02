@@ -20,6 +20,76 @@ enum DispatchError: Error, LocalizedError {
     }
 }
 
+// MARK: - Setup
+
+func setupAllClusters(config: Config) throws {
+    let s3ImagePath = config.s3.singularityImagePath
+    let s3HashPath: String
+    if let dotIndex = s3ImagePath.lastIndex(of: ".") {
+        s3HashPath = String(s3ImagePath[..<dotIndex]) + ".md5"
+    } else {
+        s3HashPath = s3ImagePath + ".md5"
+    }
+
+    for (name, cluster) in config.clusters {
+        print("Setting up \(name) (\(cluster.host))...")
+
+        let repoDir = cluster.remoteRepoDir
+
+        // Clone or update the repo
+        try setupRepo(cluster: cluster, config: config)
+
+        let s3cfgRemote = "\(repoDir)/.s3cfg"
+        print("  Staging .s3cfg...")
+        let scpResult = try scp(localPath: config.s3.expandedS3cfgPath, cluster: cluster, remotePath: s3cfgRemote)
+        guard scpResult.succeeded else {
+            throw DispatchError.scpFailed(file: ".s3cfg", output: scpResult.combinedOutput)
+        }
+        _ = try ssh(cluster: cluster, command: "chmod 600 \(s3cfgRemote)")
+
+        // Download singularity image (force)
+        let imageRemote = "\(repoDir)/container.sif"
+        print("  Downloading Singularity image (force)...")
+        let downloadResult = try ssh(
+            cluster: cluster,
+            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3ImagePath) \(imageRemote)"
+        )
+        guard downloadResult.succeeded else {
+            throw DispatchError.sshFailed(
+                host: cluster.host,
+                command: "s3cmd get container.sif",
+                output: downloadResult.combinedOutput
+            )
+        }
+        print("  Singularity image downloaded.")
+
+        // Verify MD5
+        print("  Verifying MD5...")
+        let md5Tmp = "\(repoDir)/container.md5"
+        let md5Download = try ssh(
+            cluster: cluster,
+            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3HashPath) \(md5Tmp)"
+        )
+        let remoteHashResult = try ssh(cluster: cluster, command: "awk '{print $1}' \(md5Tmp)")
+        let localHashResult = try ssh(cluster: cluster, command: "md5sum \(imageRemote) | awk '{print $1}'")
+
+        let remoteHash = remoteHashResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localHash = localHashResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if md5Download.succeeded && remoteHashResult.succeeded && !remoteHash.isEmpty {
+            if localHash == remoteHash {
+                print("  MD5 verified: \(localHash)")
+            } else {
+                fputs("  WARNING: MD5 mismatch on \(name)! local=\(localHash) remote=\(remoteHash)\n", stderr)
+            }
+        } else {
+            print("  No remote .md5 found at \(s3HashPath), skipping verification.")
+        }
+
+        print("  \(name) setup complete.")
+    }
+}
+
 // MARK: - Load balancing
 
 func getExpectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date {
@@ -112,53 +182,16 @@ func validateCache(cluster: ClusterConfig, config: Config) throws {
         }
     }
 
-    // Download Singularity image if missing or outdated
+    // Check Singularity image is present (use --setup to download)
     let sifCheck = try ssh(cluster: cluster, command: "test -f \(imageRemote) && echo exists || echo missing")
-    let s3ImagePath = config.s3.singularityImagePath
-    let s3HashPath: String
-    if let dotIndex = s3ImagePath.lastIndex(of: ".") {
-        s3HashPath = String(s3ImagePath[..<dotIndex]) + ".md5"
-    } else {
-        s3HashPath = s3ImagePath + ".md5"
-    }
-
-    var needsDownload = true
-    if sifCheck.stdout.contains("exists") {
-        // Compare local MD5 hash to remote .md5 file
-        print("  Computing MD5 of local Singularity image...")
-        let localHashResult = try ssh(cluster: cluster, command: "md5sum \(imageRemote) | awk '{print $1}'")
-        let remoteHashResult = try ssh(cluster: cluster, command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get \(s3HashPath) - 2>/dev/null | awk '{print $1}'")
-
-        if localHashResult.succeeded && remoteHashResult.succeeded
-            && !localHashResult.stdout.isEmpty && !remoteHashResult.stdout.isEmpty
-            && localHashResult.stdout == remoteHashResult.stdout {
-            print("  Singularity image is up to date (MD5 match).")
-            needsDownload = false
-        } else if remoteHashResult.succeeded && !remoteHashResult.stdout.isEmpty {
-            print("  Singularity image is outdated (MD5 mismatch), re-downloading...")
-        } else {
-            print("  No remote .md5 found, skipping hash check. Image already present.")
-            needsDownload = false
-        }
-    }
-
-    if needsDownload {
-        if sifCheck.stdout.contains("missing") {
-            print("  Downloading Singularity image from S3 (this may take a while)...")
-        }
-        let downloadResult = try ssh(
-            cluster: cluster,
-            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3ImagePath) \(imageRemote)"
+    if sifCheck.stdout.contains("missing") {
+        throw DispatchError.sshFailed(
+            host: cluster.host,
+            command: "test -f container.sif",
+            output: "Singularity image not found at \(imageRemote). Run 'submit --setup' first."
         )
-        guard downloadResult.succeeded else {
-            throw DispatchError.sshFailed(
-                host: cluster.host,
-                command: "s3cmd get container.sif",
-                output: downloadResult.combinedOutput
-            )
-        }
-        print("  Singularity image downloaded.")
     }
+    print("  Singularity image present.")
 }
 
 // MARK: - Job dispatch

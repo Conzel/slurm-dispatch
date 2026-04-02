@@ -4,6 +4,17 @@ import Foundation
 
 let args = CommandLine.arguments.dropFirst()
 
+if args.first == "--setup" {
+    do {
+        let config = try loadConfig()
+        try setupAllClusters(config: config)
+        exit(0)
+    } catch {
+        fputs("Error: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 if args.first == "--init" {
     guard !FileManager.default.fileExists(atPath: configPath) else {
         fputs("Config already exists at \(configPath). Remove it first if you want to reset.\n", stderr)
@@ -24,7 +35,8 @@ let scriptArgs = args.filter { !$0.hasPrefix("-") }
 
 guard !scriptArgs.isEmpty else {
     fputs("Usage: submit <script.sh> [script2.sh ...]\n", stderr)
-    fputs("       submit --init   (create example config at \(configPath))\n", stderr)
+    fputs("       submit --init    (create example config at \(configPath))\n", stderr)
+    fputs("       submit --setup   (download singularity image to all clusters)\n", stderr)
     exit(1)
 }
 

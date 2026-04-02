@@ -5,12 +5,6 @@ struct Config: Decodable {
     let s3: S3Config
     let git: GitConfig
     let tokens: TokensConfig?
-    let jobDefaults: JobDefaults
-
-    enum CodingKeys: String, CodingKey {
-        case clusters, s3, git, tokens
-        case jobDefaults = "job_defaults"
-    }
 }
 
 struct ClusterConfig: Decodable {
@@ -34,21 +28,16 @@ struct S3Config: Decodable {
     let localS3cfgFile: String
     let bucketUrl: String
     let singularityImagePath: String
-    let resultsUploadPath: String
-    let logsUploadPath: String
 
     enum CodingKeys: String, CodingKey {
         case localS3cfgFile = "local_s3cfg_file"
         case bucketUrl = "bucket_url"
         case singularityImagePath = "singularity_image_path"
-        case resultsUploadPath = "results_upload_path"
-        case logsUploadPath = "logs_upload_path"
     }
 
     var expandedS3cfgPath: String {
         (localS3cfgFile as NSString).expandingTildeInPath
     }
-
 }
 
 struct GitConfig: Decodable {
@@ -70,14 +59,6 @@ struct TokensConfig: Decodable {
 
     var expandedHfTokenPath: String? {
         hfTokenFile.map { ($0 as NSString).expandingTildeInPath }
-    }
-}
-
-struct JobDefaults: Decodable {
-    let localResultsFolderName: String
-
-    enum CodingKeys: String, CodingKey {
-        case localResultsFolderName = "local_results_folder_name"
     }
 }
 
@@ -107,15 +88,10 @@ let exampleConfig = """
   "s3": {
     "local_s3cfg_file": "~/.my_s3_configs/.s3cfg",
     "bucket_url": "s3://my-experiment-bucket",
-    "singularity_image_path": "s3://my-experiment-bucket/images/container.sif",
-    "results_upload_path": "s3://my-experiment-bucket/results/",
-    "logs_upload_path": "s3://my-experiment-bucket/logs/"
+    "singularity_image_path": "s3://my-experiment-bucket/images/container.sif"
   },
   "tokens": {
     "hf_token_file": "~/.cache/huggingface/token"
-  },
-  "job_defaults": {
-    "local_results_folder_name": "results"
   }
 }
 """
