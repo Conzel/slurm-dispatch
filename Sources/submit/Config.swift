@@ -12,15 +12,20 @@ struct ClusterConfig: Decodable {
     let user: String
     let sshKeyPath: String
     let remoteRepoDir: String
+    let scheduler: String?
 
     enum CodingKeys: String, CodingKey {
-        case host, user
+        case host, user, scheduler
         case sshKeyPath = "ssh_key_path"
         case remoteRepoDir = "remote_repo_dir"
     }
 
     var expandedKeyPath: String {
         (sshKeyPath as NSString).expandingTildeInPath
+    }
+
+    var schedulerImpl: Scheduler {
+        makeScheduler(scheduler)
     }
 }
 
@@ -72,13 +77,15 @@ let exampleConfig = """
       "host": "login.cluster-a.edu",
       "user": "jdoe",
       "ssh_key_path": "~/.ssh/id_rsa_cluster_a",
-      "remote_repo_dir": "/scratch/jdoe/repo"
+      "remote_repo_dir": "/scratch/jdoe/repo",
+      "scheduler": "slurm"
     },
     "cluster_b": {
       "host": "login.cluster-b.com",
       "user": "jdoe",
       "ssh_key_path": "~/.ssh/id_rsa_cluster_b",
-      "remote_repo_dir": "/work/group/jdoe/repo"
+      "remote_repo_dir": "/work/group/jdoe/repo",
+      "scheduler": "htcondor"
     }
   },
   "git": {

@@ -54,9 +54,36 @@ for scriptPath in scriptPaths {
 do {
     let config = try loadConfig()
 
+    // Determine which scheduler these scripts target from their file extensions.
+    // All scripts in one submit invocation must target the same scheduler.
+    var resolvedScheduler: String? = nil
+    for scriptPath in scriptPaths {
+        guard let s = schedulerName(forScriptPath: scriptPath) else {
+            let ext = (scriptPath as NSString).pathExtension
+            fputs("Error: cannot infer scheduler from '\(scriptPath)' "
+                + "(extension '.\(ext)'). Expected .sbatch or .htcondor.\n", stderr)
+            exit(1)
+        }
+        if let prev = resolvedScheduler, prev != s {
+            fputs("Error: mixed schedulers in one invocation "
+                + "(\(prev) vs \(s)). Submit them separately.\n", stderr)
+            exit(1)
+        }
+        resolvedScheduler = s
+    }
+    let targetScheduler = resolvedScheduler!
+
+    let candidateClusters = config.clusters.filter { (_, cluster) in
+        (cluster.scheduler ?? "slurm").lowercased() == targetScheduler
+    }
+    guard !candidateClusters.isEmpty else {
+        fputs("Error: no clusters in config have scheduler='\(targetScheduler)'.\n", stderr)
+        exit(1)
+    }
+
     // Select the cluster with the earliest expected start time
-    print("Checking expected start times...")
-    let (clusterName, cluster) = try selectCluster(from: config.clusters, scriptPath: scriptPaths[0])
+    print("Checking expected start times (\(targetScheduler) clusters)...")
+    let (clusterName, cluster) = try selectCluster(from: candidateClusters, scriptPath: scriptPaths[0])
     print("Selected cluster: \(clusterName)")
 
     // Clone or update the repo first (creates remoteRepoDir)

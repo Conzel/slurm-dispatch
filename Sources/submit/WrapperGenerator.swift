@@ -1,6 +1,7 @@
 import Foundation
 
 func generateWrapper(
+    scheduler: Scheduler,
     cluster: ClusterConfig,
     config: Config,
     repoDir: String,
@@ -14,14 +15,15 @@ func generateWrapper(
     let resultsBase = "\(bucketUrl)/results/"
     let logBase = "\(bucketUrl)/logs/"
 
-    // Extract #SBATCH directives from user script to forward them to the wrapper
-    let sbatchLines = userScriptContent
-        .components(separatedBy: .newlines)
-        .filter { $0.hasPrefix("#SBATCH") }
-        .joined(separator: "\n")
-    let sbatchSection = sbatchLines.isEmpty ? "" : sbatchLines + "\n"
+    // Scheduler-specific directives forwarded into the wrapper preamble.
+    let directiveSection = scheduler.extractDirectives(from: userScriptContent)
+    let logDirectives = scheduler.wrapperLogDirectives(repoDir: repoDir)
+    let logDirectivesSection = logDirectives.isEmpty ? "" : logDirectives + "\n"
 
-    // Extract #REQUIRE S3 [OVERWRITE|SKIP] <path> directives
+    let jobIdVar = scheduler.jobIdEnvVar
+    let logPaths = scheduler.wrapperLogPaths(repoDir: repoDir)
+
+    // Extract #REQUIRE S3 [OVERWRITE|SKIP] <path> directives (scheduler-agnostic).
     struct S3Require {
         let path: String
         let overwrite: Bool
@@ -69,9 +71,7 @@ func generateWrapper(
 
     return """
     #!/bin/bash
-    \(sbatchSection)#SBATCH --output=\(repoDir)/logs/slurm-%j.out
-    #SBATCH --error=\(repoDir)/logs/slurm-%j.err
-
+    \(directiveSection)\(logDirectivesSection)
     # == Setup Phase ==
     export S3CMD_CONFIG=\(s3cfgPath)
     [ -f \(repoDir)/.hf_token ] && export HF_TOKEN=$(cat \(repoDir)/.hf_token)
@@ -86,16 +86,16 @@ func generateWrapper(
             echo "[submit] No results found at \(resultsFolderName)"
         fi
 
-        if [ -f "logs/slurm-${SLURM_JOB_ID}.out" ]; then
-            s3cmd put "logs/slurm-${SLURM_JOB_ID}.out" "\(logBase)${SLURM_JOB_ID}/" || true
+        if [ -f "\(logPaths.out)" ]; then
+            s3cmd put "\(logPaths.out)" "\(logBase)${\(jobIdVar)}/" || true
         else
-            echo "[submit] No log found at logs/slurm-${SLURM_JOB_ID}.out"
+            echo "[submit] No log found at \(logPaths.out)"
         fi
 
-        if [ -f "logs/slurm-${SLURM_JOB_ID}.err" ]; then
-            s3cmd put "logs/slurm-${SLURM_JOB_ID}.err" "\(logBase)${SLURM_JOB_ID}/" || true
+        if [ -f "\(logPaths.err)" ]; then
+            s3cmd put "\(logPaths.err)" "\(logBase)${\(jobIdVar)}/" || true
         else
-            echo "[submit] No log found at logs/slurm-${SLURM_JOB_ID}.err"
+            echo "[submit] No log found at \(logPaths.err)"
         fi
     }
     trap cleanup EXIT ERR TERM

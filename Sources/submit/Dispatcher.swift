@@ -92,36 +92,6 @@ func setupAllClusters(config: Config) throws {
 
 // MARK: - Load balancing
 
-func getExpectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date {
-    let parentDir = (cluster.remoteRepoDir as NSString).deletingLastPathComponent
-    let remoteTmp = "\(parentDir)/.submit_test_\(UUID().uuidString).sbatch"
-    defer { _ = try? ssh(cluster: cluster, command: "rm -f \(remoteTmp)") }
-
-    let scpResult = try scp(localPath: scriptPath, cluster: cluster, remotePath: remoteTmp)
-    guard scpResult.succeeded else {
-        throw DispatchError.scpFailed(file: scriptPath, output: scpResult.combinedOutput)
-    }
-
-    let result = try ssh(cluster: cluster, command: "sbatch --test-only \(remoteTmp) 2>&1")
-    // sbatch --test-only outputs to stderr, e.g.:
-    // "sbatch: Job 12345 to start at 2024-01-15T10:30:00 using 4 processors on nodes node01"
-    let output = result.combinedOutput
-    guard let range = output.range(of: "start at ") else {
-        throw DispatchError.sbatchOutputUnexpected(output)
-    }
-    let afterStartAt = output[range.upperBound...]
-    let dateString = String(afterStartAt.prefix(while: { !$0.isWhitespace }))
-
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-
-    guard let date = formatter.date(from: dateString) else {
-        throw DispatchError.sbatchOutputUnexpected(output)
-    }
-    return date
-}
-
 func selectCluster(from clusters: [String: ClusterConfig], scriptPath: String) throws -> (name: String, config: ClusterConfig) {
     let timeFormatter = DateFormatter()
     timeFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -130,8 +100,8 @@ func selectCluster(from clusters: [String: ClusterConfig], scriptPath: String) t
 
     for (name, cluster) in clusters {
         do {
-            let startTime = try getExpectedStartTime(cluster: cluster, scriptPath: scriptPath)
-            print("  \(name) (\(cluster.host)): expected start at \(timeFormatter.string(from: startTime))")
+            let startTime = try cluster.schedulerImpl.expectedStartTime(cluster: cluster, scriptPath: scriptPath)
+            print("  \(name) (\(cluster.host), \(cluster.schedulerImpl.name)): expected start at \(timeFormatter.string(from: startTime))")
             if best == nil || startTime < best!.startTime {
                 best = (name, cluster, startTime)
             }
@@ -223,12 +193,14 @@ func dispatchJob(
     config: Config,
     scriptPath: String
 ) throws -> String {
+    let scheduler = cluster.schedulerImpl
     let repoDir = cluster.remoteRepoDir
     let scriptName = URL(fileURLWithPath: scriptPath).lastPathComponent
     let userScriptContent = try String(contentsOfFile: scriptPath, encoding: .utf8)
 
-    // Generate wrapper script
+    // Generate wrapper script.
     let wrapperContent = generateWrapper(
+        scheduler: scheduler,
         cluster: cluster,
         config: config,
         repoDir: repoDir,
@@ -236,48 +208,65 @@ func dispatchJob(
         userScriptContent: userScriptContent
     )
 
-    // Write wrapper to a local temp file
+    // Local temp file for the wrapper.
+    let wrapperBaseName = "wrapper_tmp_\(UUID().uuidString)"
     let tmpWrapper = FileManager.default.temporaryDirectory
-        .appendingPathComponent("submit_wrapper_\(UUID().uuidString).sh")
+        .appendingPathComponent("\(wrapperBaseName).sh")
     try wrapperContent.write(to: tmpWrapper, atomically: true, encoding: .utf8)
     defer { try? FileManager.default.removeItem(at: tmpWrapper) }
 
-    // SCP user script into repo root
+    // SCP user script into repo root.
     let scpScript = try scp(localPath: scriptPath, cluster: cluster, remotePath: "\(repoDir)/\(scriptName)")
     guard scpScript.succeeded else {
         throw DispatchError.scpFailed(file: scriptName, output: scpScript.combinedOutput)
     }
 
-    // Ensure logs directory exists before SCP-ing the wrapper into it
+    // Ensure logs directory exists before SCP-ing into it.
     let mklogsResult = try ssh(cluster: cluster, command: "mkdir -p \(repoDir)/logs")
     guard mklogsResult.succeeded else {
         throw DispatchError.sshFailed(host: cluster.host, command: "mkdir -p \(repoDir)/logs", output: mklogsResult.combinedOutput)
     }
 
-    // SCP wrapper into logs/ with a temporary name
-    let tmpWrapperName = "wrapper_tmp_\(UUID().uuidString).sh"
-    let scpWrapper = try scp(localPath: tmpWrapper.path, cluster: cluster, remotePath: "\(repoDir)/logs/\(tmpWrapperName)")
+    // SCP wrapper into logs/.
+    let wrapperRemote = "\(repoDir)/logs/\(wrapperBaseName).sh"
+    let scpWrapper = try scp(localPath: tmpWrapper.path, cluster: cluster, remotePath: wrapperRemote)
     guard scpWrapper.succeeded else {
-        throw DispatchError.scpFailed(file: tmpWrapperName, output: scpWrapper.combinedOutput)
+        throw DispatchError.scpFailed(file: "\(wrapperBaseName).sh", output: scpWrapper.combinedOutput)
     }
 
-    // Submit via sbatch from repo root
-    let sbatchResult = try ssh(
+    // Generate + upload a scheduler-specific submit-file companion (e.g. .condor), if any.
+    if let extra = scheduler.extraSubmitFile(
+        wrapperBaseName: wrapperBaseName,
+        userScript: userScriptContent,
+        repoDir: repoDir
+    ) {
+        let tmpExtra = FileManager.default.temporaryDirectory.appendingPathComponent(extra.filename)
+        try extra.content.write(to: tmpExtra, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmpExtra) }
+        let extraRemote = "\(repoDir)/logs/\(extra.filename)"
+        let scpExtra = try scp(localPath: tmpExtra.path, cluster: cluster, remotePath: extraRemote)
+        guard scpExtra.succeeded else {
+            throw DispatchError.scpFailed(file: extra.filename, output: scpExtra.combinedOutput)
+        }
+    }
+
+    // Submit.
+    let submitTarget = scheduler.submitTargetPath(wrapperBaseName: wrapperBaseName)
+    let submitCmd = scheduler.submitCommand(submitRelativePath: submitTarget)
+    let submitResult = try ssh(
         cluster: cluster,
-        command: "cd \(repoDir) && sbatch logs/\(tmpWrapperName)"
+        command: "cd \(repoDir) && \(submitCmd)"
     )
-    guard sbatchResult.succeeded else {
-        throw DispatchError.sshFailed(host: cluster.host, command: "sbatch \(tmpWrapperName)", output: sbatchResult.combinedOutput)
+    guard submitResult.succeeded else {
+        throw DispatchError.sshFailed(host: cluster.host, command: submitCmd, output: submitResult.combinedOutput)
     }
 
-    // Parse "Submitted batch job <ID>" from sbatch output
-    let output = sbatchResult.stdout
-    guard let slurmId = output.components(separatedBy: .whitespaces).last, !slurmId.isEmpty else {
-        throw DispatchError.sbatchOutputUnexpected(output)
+    let jobId = try scheduler.parseJobId(from: submitResult.stdout)
+
+    // Post-submit housekeeping (rename temp wrapper artifacts to include the job id).
+    for cmd in scheduler.postSubmitRenames(wrapperBaseName: wrapperBaseName, jobId: jobId, repoDir: repoDir) {
+        _ = try ssh(cluster: cluster, command: cmd)
     }
 
-    // Rename wrapper to use the Slurm job ID
-    _ = try ssh(cluster: cluster, command: "mv \(repoDir)/logs/\(tmpWrapperName) \(repoDir)/logs/wrapper_\(slurmId).sh")
-
-    return slurmId
+    return jobId
 }
