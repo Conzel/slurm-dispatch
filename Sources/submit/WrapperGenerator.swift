@@ -22,6 +22,8 @@ func generateWrapper(
 
     let jobIdVar = scheduler.jobIdEnvVar
     let logPaths = scheduler.wrapperLogPaths(repoDir: repoDir)
+    let jobIdInit = scheduler.wrapperJobIdInit()
+    let jobIdInitSection = jobIdInit.isEmpty ? "" : jobIdInit + "\n    "
 
     // Extract #REQUIRE S3 [OVERWRITE|SKIP] <path> directives (scheduler-agnostic).
     struct S3Require {
@@ -47,7 +49,10 @@ func generateWrapper(
         }
 
     let s3RequireSection: String
-    if s3Requires.isEmpty {
+    if s3Requires.isEmpty || !scheduler.executeHasS3Egress {
+        // Either no S3 requirements, or execute nodes can't reach S3 (in which
+        // case the dispatcher pre-staged them on the login node — see
+        // Dispatcher.preStageS3Requirements).
         s3RequireSection = ""
     } else {
         let commands = s3Requires.map { req -> String in
@@ -73,10 +78,38 @@ func generateWrapper(
     #!/bin/bash
     \(directiveSection)\(logDirectivesSection)
     # == Setup Phase ==
+    \(jobIdInitSection)# HTCondor often points HOME at the scratch dir, so resolve the real one
+    # from passwd. Harmless under SLURM (overwrites HOME with the same value).
+    export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+    export PATH="$HOME/.local/bin:$PATH"
     export S3CMD_CONFIG=\(s3cfgPath)
     [ -f \(repoDir)/.hf_token ] && export HF_TOKEN=$(cat \(repoDir)/.hf_token)
     cd \(repoDir)
 
+    \(scheduler.executeHasS3Egress ? cleanupTrapSection(
+        repoDir: repoDir,
+        resultsFolderName: resultsFolderName,
+        resultsBase: resultsBase,
+        logPaths: logPaths,
+        logBase: logBase,
+        jobIdVar: jobIdVar
+    ) : "# (no in-job S3 teardown — execute nodes lack egress; upload runs on the login node post-completion)")
+
+    \(s3RequireSection)# == Execution Phase ==
+    # singularity exec \(imagePath) bash \(scriptName)
+    bash \(scriptName)
+    """
+}
+
+private func cleanupTrapSection(
+    repoDir: String,
+    resultsFolderName: String,
+    resultsBase: String,
+    logPaths: (out: String, err: String),
+    logBase: String,
+    jobIdVar: String
+) -> String {
+    return """
     # == Teardown Trap ==
     cleanup() {
         cd \(repoDir)
@@ -99,9 +132,5 @@ func generateWrapper(
         fi
     }
     trap cleanup EXIT ERR TERM
-
-    \(s3RequireSection)# == Execution Phase ==
-    # singularity exec \(imagePath) bash \(scriptName)
-    bash \(scriptName)
     """
 }

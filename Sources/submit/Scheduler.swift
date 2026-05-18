@@ -3,10 +3,19 @@ import Foundation
 protocol Scheduler {
     var name: String { get }
     var jobIdEnvVar: String { get }
+    /// `true` if execute nodes have outbound network to S3 (so the wrapper can
+    /// run s3cmd at job runtime). `false` means the dispatcher must pre-stage
+    /// `#REQUIRE S3` artifacts via SSH on the login node and the wrapper must
+    /// not touch S3 at all.
+    var executeHasS3Egress: Bool { get }
 
     func extractDirectives(from userScript: String) -> String
     func wrapperLogDirectives(repoDir: String) -> String
     func wrapperLogPaths(repoDir: String) -> (out: String, err: String)
+    /// Shell snippet inserted near the top of the wrapper that defines the
+    /// `$JOB_ID` env var (used by cleanup + log upload). Returns "" if the
+    /// scheduler already exports it (e.g. SLURM via $SLURM_JOB_ID).
+    func wrapperJobIdInit() -> String
 
     func extraSubmitFile(
         wrapperBaseName: String,
@@ -15,10 +24,16 @@ protocol Scheduler {
     ) -> (filename: String, content: String)?
 
     func submitTargetPath(wrapperBaseName: String) -> String
-    func submitCommand(submitRelativePath: String) -> String
+    func submitCommand(submitRelativePath: String, userScript: String) -> String
     func parseJobId(from stdout: String) throws -> String
 
     func postSubmitRenames(wrapperBaseName: String, jobId: String, repoDir: String) -> [String]
+
+    /// An SSH command to run on the login node right after submit, detached, to
+    /// handle post-completion work (e.g. uploading results to S3 once the job
+    /// finishes — needed when execute nodes have no S3 egress). Returns nil if
+    /// the scheduler handles uploads in-job.
+    func postDispatchCommand(jobId: String, repoDir: String, config: Config) -> String?
 
     func expectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date
 }
@@ -28,6 +43,7 @@ protocol Scheduler {
 struct SlurmScheduler: Scheduler {
     let name = "slurm"
     let jobIdEnvVar = "SLURM_JOB_ID"
+    let executeHasS3Egress = true
 
     func extractDirectives(from userScript: String) -> String {
         let lines = userScript
@@ -51,7 +67,13 @@ struct SlurmScheduler: Scheduler {
         )
     }
 
-    func extraSubmitFile(wrapperBaseName: String, userScript: String, repoDir: String) -> (filename: String, content: String)? {
+    func wrapperJobIdInit() -> String { return "" }
+
+    func extraSubmitFile(
+        wrapperBaseName: String,
+        userScript: String,
+        repoDir: String
+    ) -> (filename: String, content: String)? {
         return nil
     }
 
@@ -59,7 +81,7 @@ struct SlurmScheduler: Scheduler {
         return "logs/\(wrapperBaseName).sh"
     }
 
-    func submitCommand(submitRelativePath: String) -> String {
+    func submitCommand(submitRelativePath: String, userScript: String) -> String {
         return "sbatch \(submitRelativePath)"
     }
 
@@ -72,6 +94,11 @@ struct SlurmScheduler: Scheduler {
 
     func postSubmitRenames(wrapperBaseName: String, jobId: String, repoDir: String) -> [String] {
         return ["mv \(repoDir)/logs/\(wrapperBaseName).sh \(repoDir)/logs/wrapper_\(jobId).sh"]
+    }
+
+    func postDispatchCommand(jobId: String, repoDir: String, config: Config) -> String? {
+        // SLURM execute nodes have S3 egress; the wrapper uploads in-job.
+        return nil
     }
 
     func expectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date {
@@ -108,6 +135,7 @@ struct SlurmScheduler: Scheduler {
 struct CondorScheduler: Scheduler {
     let name = "htcondor"
     let jobIdEnvVar = "JOB_ID"
+    let executeHasS3Egress = false  // MPI-IS execute nodes have no outbound network
 
     func extractDirectives(from userScript: String) -> String {
         return ""
@@ -124,7 +152,20 @@ struct CondorScheduler: Scheduler {
         )
     }
 
-    func extraSubmitFile(wrapperBaseName: String, userScript: String, repoDir: String) -> (filename: String, content: String)? {
+    func wrapperJobIdInit() -> String {
+        // The .condor file passes "$(Cluster).$(Process)" as the first positional
+        // arg to /bin/bash (see arguments line in extraSubmitFile). HTCondor
+        // expands those macros at submit time. `environment="JOB_ID=..."` is
+        // unreliable across condor versions, so we go through $1 instead.
+        // Exported so the user script (run as a child `bash`) inherits it.
+        return "export JOB_ID=\"$1\""
+    }
+
+    func extraSubmitFile(
+        wrapperBaseName: String,
+        userScript: String,
+        repoDir: String
+    ) -> (filename: String, content: String)? {
         let condorDirectives = userScript
             .components(separatedBy: .newlines)
             .compactMap { line -> String? in
@@ -137,11 +178,10 @@ struct CondorScheduler: Scheduler {
         let content = """
         universe                = vanilla
         executable              = /bin/bash
-        arguments               = "\(repoDir)/logs/\(wrapperBaseName).sh"
+        arguments               = "\(repoDir)/logs/\(wrapperBaseName).sh $(Cluster).$(Process)"
         output                  = \(repoDir)/logs/condor-$(Cluster).$(Process).out
         error                   = \(repoDir)/logs/condor-$(Cluster).$(Process).err
         log                     = \(repoDir)/logs/condor-$(Cluster).$(Process).log
-        environment             = "JOB_ID=$(Cluster).$(Process)"
         getenv                  = false
         \(condorDirectives)
         queue 1
@@ -153,8 +193,25 @@ struct CondorScheduler: Scheduler {
         return "logs/\(wrapperBaseName).condor"
     }
 
-    func submitCommand(submitRelativePath: String) -> String {
+    func submitCommand(submitRelativePath: String, userScript: String) -> String {
+        // `#CONDOR_BID <N>` in the user script switches us onto MPI-IS's
+        // condor_submit_bid wrapper, which takes the bid as a CLI arg
+        // (not as a submit-file directive).
+        if let bid = parseBid(from: userScript) {
+            return "condor_submit_bid \(bid) \(submitRelativePath)"
+        }
         return "condor_submit \(submitRelativePath)"
+    }
+
+    private func parseBid(from userScript: String) -> Int? {
+        for line in userScript.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#CONDOR_BID ") else { continue }
+            let rest = String(trimmed.dropFirst("#CONDOR_BID ".count))
+                .trimmingCharacters(in: .whitespaces)
+            return Int(rest)
+        }
+        return nil
     }
 
     func parseJobId(from stdout: String) throws -> String {
@@ -174,6 +231,39 @@ struct CondorScheduler: Scheduler {
         // Keep the .sh wrapper at its original path — the queued condor job's
         // `arguments` line points at it. Only rename the .condor for human bookkeeping.
         return ["mv \(repoDir)/logs/\(wrapperBaseName).condor \(repoDir)/logs/wrapper_\(jobId).condor"]
+    }
+
+    func postDispatchCommand(jobId: String, repoDir: String, config: Config) -> String? {
+        // Compute nodes have no S3 egress, so the upload runs on the login node.
+        // Launch a detached watcher: condor_wait blocks until the job's event log
+        // shows termination, then s3cmd sync runs (login node has egress).
+        // The watcher outlives the SSH session via nohup + full FD redirection.
+        let bucketUrl = config.s3.bucketUrl.hasSuffix("/")
+            ? String(config.s3.bucketUrl.dropLast()) : config.s3.bucketUrl
+        let resultsBase = "\(bucketUrl)/results/"
+        let logBase = "\(bucketUrl)/logs/"
+        let s3cfgPath = "\(repoDir)/.s3cfg"
+        let jobLog = "\(repoDir)/logs/condor-\(jobId).0.log"
+        let watcherLog = "\(repoDir)/logs/sync_\(jobId).log"
+
+        // Single-quoted bash -c body — contains no single quotes.
+        let body = """
+        export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+        export PATH="$HOME/.local/bin:$PATH"
+        export S3CMD_CONFIG=\(s3cfgPath)
+        echo "[submit/watch] waiting for job \(jobId) to finish..."
+        condor_wait \(jobLog)
+        cd \(repoDir)
+        echo "[submit/watch] job finished; uploading results"
+        s3cmd sync results/ \(resultsBase) || true
+        for stream in out err; do
+          f=logs/condor-\(jobId).0.$stream
+          [ -f "$f" ] && s3cmd put "$f" \(logBase)\(jobId)/ || true
+        done
+        echo "[submit/watch] done"
+        """
+
+        return "nohup bash -c '\(body)' > \(watcherLog) 2>&1 < /dev/null &"
     }
 
     func expectedStartTime(cluster: ClusterConfig, scriptPath: String) throws -> Date {

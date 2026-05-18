@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# --- HTCondor Directives ---
+# These #CONDOR lines are extracted by `submit` into the generated .condor submit
+# file. Anything valid in an HTCondor submit file can go here (one directive per
+# line, prefixed with `#CONDOR `). HTCondor does NOT support trailing `#`
+# comments inside expressions — keep these lines comment-free after the value.
+#CONDOR_BID 25
+#CONDOR request_cpus            = 2
+#CONDOR request_memory          = 8GB
+#CONDOR request_disk            = 4GB
+#CONDOR request_gpus            = 0
+#CONDOR notification            = Error
+#CONDOR +JobBatchName           = "my_test_job"
+
+# `submit` sets JOB_ID=$(Cluster).$(Process) via the .condor environment line,
+# so $JOB_ID is the analogue of SLURM's $SLURM_JOB_ID.
+echo "Hello from HTCondor job $JOB_ID"
+
+sleep 10
+mkdir -p results
+cd results
+echo Hello > test.txt

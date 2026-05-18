@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# --- HTCondor Directives ---
+#CONDOR_BID 25
+#CONDOR request_cpus            = 2
+#CONDOR request_memory          = 8GB
+#CONDOR request_disk            = 4GB
+#CONDOR request_gpus            = 0
+#CONDOR notification            = Error
+#CONDOR +JobBatchName           = "example_s3"
+
+# --- S3 input requirement ---
+# Pre-staged on the LOGIN node before submit (compute nodes have no S3 egress).
+# `submit` resolves this against <bucket>/results/ and drops it on Lustre.
+#REQUIRE S3 results/test.txt
+
+echo "Hello from HTCondor job $JOB_ID"
+
+# 1. Verify the pre-staged input arrived.
+STAGED="results/results/test.txt"
+if [ -f "$STAGED" ]; then
+    echo "[example_s3] input present: $STAGED -> $(cat "$STAGED")"
+else
+    echo "[example_s3] ERROR: pre-staged input missing: $STAGED" >&2
+    exit 1
+fi
+
+# 2. Produce a genuinely NEW result file with fresh content. The login-node
+#    watcher syncs results/ to <bucket>/results/ after the job exits, so this
+#    should land at <bucket>/results/output_<JOB_ID>.txt.
+mkdir -p results
+OUT="results/output_${JOB_ID}.txt"
+echo "produced by HTCondor job ${JOB_ID} at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT"
+echo "[example_s3] wrote new result: $OUT"
+cat "$OUT"

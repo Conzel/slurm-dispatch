@@ -52,7 +52,7 @@ func setupAllClusters(config: Config) throws {
         print("  Downloading Singularity image (force)...")
         let downloadResult = try ssh(
             cluster: cluster,
-            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3ImagePath) \(imageRemote)"
+            command: "PATH=\"$HOME/.local/bin:$PATH\" S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3ImagePath) \(imageRemote)"
         )
         guard downloadResult.succeeded else {
             throw DispatchError.sshFailed(
@@ -68,7 +68,7 @@ func setupAllClusters(config: Config) throws {
         let md5Tmp = "\(repoDir)/container.md5"
         let md5Download = try ssh(
             cluster: cluster,
-            command: "S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3HashPath) \(md5Tmp)"
+            command: "PATH=\"$HOME/.local/bin:$PATH\" S3CMD_CONFIG=\(s3cfgRemote) s3cmd get --force \(s3HashPath) \(md5Tmp)"
         )
         let remoteHashResult = try ssh(cluster: cluster, command: "awk '{print $1}' \(md5Tmp)")
         let localHashResult = try ssh(cluster: cluster, command: "md5sum \(imageRemote) | awk '{print $1}'")
@@ -234,6 +234,17 @@ func dispatchJob(
         throw DispatchError.scpFailed(file: "\(wrapperBaseName).sh", output: scpWrapper.combinedOutput)
     }
 
+    // If execute nodes can't reach S3, pre-stage #REQUIRE S3 artifacts via SSH
+    // on the login node now, before the job runs.
+    if !scheduler.executeHasS3Egress {
+        try preStageS3Requirements(
+            cluster: cluster,
+            config: config,
+            repoDir: repoDir,
+            userScriptContent: userScriptContent
+        )
+    }
+
     // Generate + upload a scheduler-specific submit-file companion (e.g. .condor), if any.
     if let extra = scheduler.extraSubmitFile(
         wrapperBaseName: wrapperBaseName,
@@ -252,7 +263,7 @@ func dispatchJob(
 
     // Submit.
     let submitTarget = scheduler.submitTargetPath(wrapperBaseName: wrapperBaseName)
-    let submitCmd = scheduler.submitCommand(submitRelativePath: submitTarget)
+    let submitCmd = scheduler.submitCommand(submitRelativePath: submitTarget, userScript: userScriptContent)
     let submitResult = try ssh(
         cluster: cluster,
         command: "cd \(repoDir) && \(submitCmd)"
@@ -268,5 +279,73 @@ func dispatchJob(
         _ = try ssh(cluster: cluster, command: cmd)
     }
 
+    // Launch a detached post-completion watcher on the login node if the
+    // scheduler needs one (HTCondor: uploads results to S3 after the job ends,
+    // since compute nodes have no egress).
+    if let watchCmd = scheduler.postDispatchCommand(jobId: jobId, repoDir: repoDir, config: config) {
+        let result = try ssh(cluster: cluster, command: watchCmd)
+        if result.succeeded {
+            print("  Started login-node upload watcher (logs/sync_\(jobId).log)")
+        } else {
+            fputs("  WARNING: failed to start upload watcher: \(result.combinedOutput)\n", stderr)
+        }
+    }
+
     return jobId
+}
+
+// MARK: - S3 pre-staging (for execute nodes without S3 egress)
+
+func preStageS3Requirements(
+    cluster: ClusterConfig,
+    config: Config,
+    repoDir: String,
+    userScriptContent: String
+) throws {
+    struct S3Req { let path: String; let overwrite: Bool }
+    let reqs: [S3Req] = userScriptContent
+        .components(separatedBy: .newlines)
+        .compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#REQUIRE S3 ") else { return nil }
+            var rest = String(trimmed.dropFirst("#REQUIRE S3 ".count))
+                .trimmingCharacters(in: .whitespaces)
+            guard !rest.isEmpty else { return nil }
+            var overwrite = false
+            if rest.hasPrefix("OVERWRITE ") {
+                overwrite = true
+                rest = String(rest.dropFirst("OVERWRITE ".count)).trimmingCharacters(in: .whitespaces)
+            } else if rest.hasPrefix("SKIP ") {
+                rest = String(rest.dropFirst("SKIP ".count)).trimmingCharacters(in: .whitespaces)
+            }
+            return rest.isEmpty ? nil : S3Req(path: rest, overwrite: overwrite)
+        }
+    guard !reqs.isEmpty else { return }
+
+    let bucketUrl = config.s3.bucketUrl.hasSuffix("/")
+        ? String(config.s3.bucketUrl.dropLast()) : config.s3.bucketUrl
+    let resultsBase = "\(bucketUrl)/results/"
+    let s3cfgRemote = "\(repoDir)/.s3cfg"
+
+    print("Pre-staging \(reqs.count) S3 artifact(s) on \(cluster.host)...")
+    for req in reqs {
+        let remotePath = "\(resultsBase)\(req.path)"
+        let localPath = "\(repoDir)/results/\(req.path)"
+        let localDir = (localPath as NSString).deletingLastPathComponent
+        let flag = req.overwrite ? "--force" : "--skip-existing"
+        let cmd = """
+        mkdir -p \(localDir) && \
+        PATH="$HOME/.local/bin:$PATH" S3CMD_CONFIG=\(s3cfgRemote) \
+        s3cmd get \(flag) \(remotePath) \(localPath)
+        """
+        print("  \(req.path) (\(req.overwrite ? "force" : "skip-existing"))")
+        let result = try ssh(cluster: cluster, command: cmd)
+        guard result.succeeded else {
+            throw DispatchError.sshFailed(
+                host: cluster.host,
+                command: "s3cmd get \(req.path)",
+                output: result.combinedOutput
+            )
+        }
+    }
 }
