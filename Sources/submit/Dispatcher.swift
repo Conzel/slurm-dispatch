@@ -329,16 +329,27 @@ func preStageS3Requirements(
 
     print("Pre-staging \(reqs.count) S3 artifact(s) on \(cluster.host)...")
     for req in reqs {
+        // A trailing slash means "directory": recursive get of an S3 prefix.
+        let isDir = req.path.hasSuffix("/")
         let remotePath = "\(resultsBase)\(req.path)"
         let localPath = "\(repoDir)/results/\(req.path)"
-        let localDir = (localPath as NSString).deletingLastPathComponent
         let flag = req.overwrite ? "--force" : "--skip-existing"
-        let cmd = """
-        mkdir -p \(localDir) && \
-        PATH="$HOME/.local/bin:$PATH" S3CMD_CONFIG=\(s3cfgRemote) \
-        s3cmd get \(flag) \(remotePath) \(localPath)
-        """
-        print("  \(req.path) (\(req.overwrite ? "force" : "skip-existing"))")
+        let cmd: String
+        if isDir {
+            cmd = """
+            mkdir -p \(localPath) && \
+            PATH="$HOME/.local/bin:$PATH" S3CMD_CONFIG=\(s3cfgRemote) \
+            s3cmd get --recursive \(flag) \(remotePath) \(localPath)
+            """
+        } else {
+            let localDir = (localPath as NSString).deletingLastPathComponent
+            cmd = """
+            mkdir -p \(localDir) && \
+            PATH="$HOME/.local/bin:$PATH" S3CMD_CONFIG=\(s3cfgRemote) \
+            s3cmd get \(flag) \(remotePath) \(localPath)
+            """
+        }
+        print("  \(req.path) (\(req.overwrite ? "force" : "skip-existing")\(isDir ? ", recursive" : ""))")
         let result = try ssh(cluster: cluster, command: cmd)
         guard result.succeeded else {
             throw DispatchError.sshFailed(

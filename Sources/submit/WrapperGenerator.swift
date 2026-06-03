@@ -56,10 +56,18 @@ func generateWrapper(
         s3RequireSection = ""
     } else {
         let commands = s3Requires.map { req -> String in
+            let isDir = req.path.hasSuffix("/")
             let remotePath = "\(resultsBase)\(req.path)"
             let localPath = "\(repoDir)/\(resultsFolderName)/\(req.path)"
-            let localDir = (localPath as NSString).deletingLastPathComponent
             let s3Flag = req.overwrite ? "--force" : "--skip-existing"
+            if isDir {
+                return """
+                    mkdir -p \(localPath)
+                    echo "[submit] Downloading \(remotePath) -> \(localPath)"
+                    s3cmd get --recursive \(s3Flag) \(remotePath) \(localPath)
+                """
+            }
+            let localDir = (localPath as NSString).deletingLastPathComponent
             return """
                 mkdir -p \(localDir)
                 echo "[submit] Downloading \(remotePath) -> \(localPath)"

@@ -35,3 +35,11 @@ Use `#REQUIRE S3 <path>` in your script to download files from S3 before executi
 ```
 
 This downloads `s3://{results_upload_path}/15125_352935/model.pth` to `{local_results_folder_name}/15125_352935/model.pth` before your script runs.
+
+A **trailing slash** marks a directory: the whole prefix is fetched recursively (`s3cmd get --recursive`):
+
+```bash
+#REQUIRE S3 data/mmlu-preprocessed/
+```
+
+Without the trailing slash the path is treated as a single object, and `s3cmd get` fails with `Source object ... does not exist` if it is actually a prefix.
